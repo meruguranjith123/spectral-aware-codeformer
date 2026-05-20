@@ -50,6 +50,8 @@ L = L_{\mathrm{pix}} + L_{\mathrm{perc}} + L_{\mathrm{GAN}} + L_{\mathrm{code}} 
 
 \textbf{CodeFormer.} CodeFormer casts blind face restoration as code prediction. Its transformer predicts high-quality codebook entries from degraded inputs, and a fidelity weight controls the trade-off between strict input fidelity and perceptual quality \cite{zhou2022codeformer}. The paper reports strong perceptual restoration behavior on both synthetic and real-world degraded face benchmarks. In the synthetic comparison reported in the NeurIPS paper, CodeFormer improves LPIPS from 0.712 for the degraded input to 0.299 and improves PSNR from 21.53 dB to 22.18 dB. These reported values establish the base architecture as a strong restoration prior.
 
+\textbf{GAN-prior restoration.} GFP-GAN uses a pretrained generative facial prior to restore real-world faces with a single forward pass and balances realism with identity fidelity \cite{wang2021gfpgan}. GPEN embeds GAN priors into a restoration network and is especially effective for severe in-the-wild degradation \cite{yang2021gpen}. These methods demonstrate the value of strong priors, but their priors are not explicitly optimized for spectral consistency. The proposed spectral term is therefore complementary: it can be added to a codebook-based model to directly penalize missing frequency content.
+
 \textbf{Perceptual metrics.} LPIPS was proposed after showing that deep network features often correlate with human perceptual judgments better than shallow distortion metrics such as PSNR and SSIM \cite{zhang2018lpips}. This motivates reporting both distortion metrics and perceptual metrics. Freq-L1 is added as a method-aligned diagnostic rather than a replacement for PSNR, SSIM, or LPIPS.
 
 \section{Method}
@@ -58,31 +60,48 @@ Figure~\ref{fig:architecture} summarizes the implemented pipeline. The model rec
 \begin{figure*}[t]
 \centering
 \begin{tikzpicture}[
-node distance=0.9cm,
-block/.style={draw, rounded corners=2pt, minimum width=2.2cm, minimum height=0.78cm, align=center, fill=gray!8},
-loss/.style={draw, rounded corners=2pt, minimum width=2.15cm, minimum height=0.72cm, align=center, fill=orange!12},
+node distance=0.58cm,
+block/.style={draw, rounded corners=2pt, minimum width=1.9cm, minimum height=0.66cm, align=center, fill=gray!8, font=\scriptsize},
+loss/.style={draw, rounded corners=2pt, minimum width=1.85cm, minimum height=0.62cm, align=center, fill=orange!12, font=\scriptsize},
+prior/.style={draw, rounded corners=2pt, minimum width=1.8cm, minimum height=0.62cm, align=center, fill=blue!8, font=\scriptsize},
+data/.style={draw, rounded corners=2pt, minimum width=1.85cm, minimum height=0.62cm, align=center, fill=green!8, font=\scriptsize},
 arrow/.style={-Latex, thick}
 ]
-\node[block] (lq) {LQ input\\degraded image};
-\node[block, right=of lq] (enc) {LQ encoder\\feature extraction};
-\node[block, right=of enc] (tr) {Lookup transformer\\code prediction};
-\node[block, right=of tr] (cb) {VQ codebook\\visual atoms};
-\node[block, right=of cb] (dec) {Decoder\\HQ reconstruction};
-\node[block, right=of dec] (out) {$I_{\mathrm{rec}}$};
-\node[block, below=1.15cm of cb] (gt) {$I_{\mathrm{gt}}$\\HQ target};
-\node[loss, below=1.15cm of dec] (pix) {pixel + LPIPS\\GAN/code losses};
-\node[loss, below=1.15cm of out] (freq) {Fourier magnitude\\$L_{\mathrm{freq}}$};
+\node[data] (hq) {HQ image\\$I_{\mathrm{gt}}$};
+\node[data, below=0.62cm of hq] (deg) {degradation\\blur/noise/JPEG};
+\node[data, below=0.62cm of deg] (lq) {LQ input\\$I_{\mathrm{LQ}}$};
+\node[block, right=0.75cm of lq] (enc) {LQ encoder\\multi-scale feats};
+\node[block, right=of enc] (tr) {lookup transformer\\code logits};
+\node[prior, above=0.72cm of tr] (idx) {latent target\\code indices};
+\node[prior, right=of tr] (cb) {VQ codebook\\1024 atoms};
+\node[block, right=of cb] (dec) {decoder\\HQ image};
+\node[data, right=of dec] (out) {$I_{\mathrm{rec}}$};
+\node[loss, below=0.72cm of cb] (code) {CE + feature\\code losses};
+\node[loss, below=0.72cm of dec] (pix) {pixel + LPIPS\\GAN loss};
+\node[loss, below=0.72cm of out] (freq) {log FFT magnitude\\$L_{\mathrm{freq}}$};
+\node[loss, right=0.55cm of freq] (total) {total loss\\weighted sum};
+\node[prior, above=0.72cm of cb] (vq) {fixed HQ VQGAN\\codebook prior};
+\draw[arrow] (hq) -- (deg);
+\draw[arrow] (deg) -- (lq);
 \draw[arrow] (lq) -- (enc);
 \draw[arrow] (enc) -- (tr);
 \draw[arrow] (tr) -- (cb);
 \draw[arrow] (cb) -- (dec);
 \draw[arrow] (dec) -- (out);
-\draw[arrow] (gt) -- (pix);
+\draw[arrow] (hq) -| (idx);
+\draw[arrow] (idx) -- (tr);
+\draw[arrow] (vq) -- (cb);
+\draw[arrow] (tr) -- (code);
+\draw[arrow] (idx) -- (code);
 \draw[arrow] (out) -- (pix);
-\draw[arrow] (gt) -- (freq);
+\draw[arrow] (hq) -| (pix);
+\draw[arrow] (hq) -| (freq);
 \draw[arrow] (out) -- (freq);
+\draw[arrow] (code) -- (total);
+\draw[arrow] (pix) -- (total);
+\draw[arrow] (freq) -- (total);
 \end{tikzpicture}
-\caption{Architecture of the spectral-aware CodeFormer fine-tuning setup. The backbone remains a CodeFormer-style VQ codebook and code lookup transformer. The supervision branch compares log Fourier magnitudes of the reconstruction and ground truth.}
+\caption{Detailed spectral-aware CodeFormer training pipeline. Degraded inputs are encoded and mapped to high-quality code indices by the lookup transformer. The VQ codebook and decoder reconstruct the image, while pixel, perceptual, adversarial, code prediction, and log-Fourier losses supervise complementary properties.}
 \label{fig:architecture}
 \end{figure*}
 
@@ -163,19 +182,18 @@ The key ablation is $\lambda_{\mathrm{freq}}=0$ versus $\lambda_{\mathrm{freq}}>
 \begin{table*}[t]
 \centering
 \small
-\begin{tabular}{p{0.22\textwidth}p{0.19\textwidth}p{0.22\textwidth}p{0.26\textwidth}}
+\begin{tabular}{p{0.17\textwidth}p{0.22\textwidth}p{0.26\textwidth}p{0.27\textwidth}}
 \toprule
-Experiment & Controlled variable & What it tests & Interpretation rule\\
+Method family & Representative & Strength & How the spectral idea benefits\\
 \midrule
-Baseline CodeFormer fine tuning & $\lambda_{\mathrm{freq}}=0$ & Same architecture without spectral supervision & Anchor row for all gains.\\
-Spectral fine tuning & $\lambda_{\mathrm{freq}}=0.1$ & Fourier magnitude supervision & Lower Freq-L1 with improved LPIPS and stable identity.\\
-Low spectral weight & $\lambda_{\mathrm{freq}}=0.05$ & Mild frequency regularization & Small improvement with nearly no artifacts.\\
-High spectral weight & $\lambda_{\mathrm{freq}}=0.2$ & Sensitivity to over-sharpening & Stronger edges but visible ringing and noise amplification.\\
-Dataset transfer & DIV2K subset & Face-specific versus general behavior & Smaller gains than aligned-face restoration.\\
+GAN prior & GFP-GAN \cite{wang2021gfpgan} & Realistic facial details and color enhancement from a pretrained generative prior & Spectral supervision adds an explicit detail-preservation signal that is not tied only to adversarial realism.\\
+Embedded GAN prior & GPEN \cite{yang2021gpen} & Strong restoration for severe in-the-wild degradation & Frequency loss can regularize recovered high-frequency energy and expose over-sharpened artifacts through Freq-L1.\\
+Codebook transformer & CodeFormer \cite{zhou2022codeformer} & Robust code prediction with controllable fidelity/perceptual trade-off & Our method directly improves the same pipeline by matching output and target spectra during fine tuning.\\
+Spectral-aware codebook & Ours & CodeFormer backbone plus Fourier magnitude supervision & Reduces Freq-L1 and LPIPS while preserving the codebook prior and unchanged inference path.\\
 \bottomrule
 \end{tabular}
-\caption{Ablation matrix used to interpret the spectral loss contribution.}
-\label{tab:ablations}
+\caption{Model-family comparison. Existing restoration methods use strong priors for realism or code selection; the spectral-aware extension benefits these ideas by adding an explicit frequency-consistency objective.}
+\label{tab:modelcompare}
 \end{table*}
 
 \subsection{Training Schedule}
@@ -218,9 +236,9 @@ CodeFormer is especially appropriate as the base because it already separates tw
 The final result satisfies four conditions. First, the spectral model reduces Freq-L1 on the fixed validation split. Second, LPIPS improves relative to the no-spectral ablation. Third, visual examples show sharper edges without obvious ringing at $\lambda=0.1$. Fourth, failure cases are understandable and limited: the main artifacts appear only when the spectral weight is increased. PSNR changes only slightly, which is acceptable because restoration quality is not purely pixel distortion.
 
 \section{Discussion}
-The project sits between two common restoration philosophies. One philosophy prioritizes fidelity to the degraded input and avoids hallucinating detail. Another prioritizes perceptual quality and produces plausible details even when the input is ambiguous. CodeFormer already exposes this tension through its fidelity weight. The spectral loss adds a third pressure: frequency consistency with the ground truth during supervised training. This can be helpful because blur is visible as a loss of high-frequency energy, but it is also dangerous because not all high-frequency energy is meaningful detail.
+The project sits between two common restoration philosophies. One philosophy prioritizes fidelity to the degraded input and avoids hallucinating detail. Another prioritizes perceptual quality and produces plausible details even when the input is ambiguous. CodeFormer already exposes this tension through its fidelity weight. As Table~\ref{tab:modelcompare} shows, GFP-GAN, GPEN, and CodeFormer all benefit from strong priors, but none of these priors alone explicitly enforces frequency consistency. The spectral loss adds that third pressure during supervised training. This is helpful because blur is visible as a loss of high-frequency energy, but it is also dangerous because not all high-frequency energy is meaningful detail.
 
-The report frames the method as a controlled extension rather than a replacement for CodeFormer. In the best setting, the spectral term acts like a gentle regularizer for detail preservation. In the high-weight setting, it becomes an artifact amplifier. The ablation matrix in Table~\ref{tab:ablations} captures this behavior.
+The report frames the method as a controlled extension rather than a replacement for CodeFormer. In the best setting, the spectral term acts like a gentle regularizer for detail preservation. In the high-weight setting, it becomes an artifact amplifier.
 
 \subsection{Result Reliability}
 The comparison keeps the same backbone, degradation process, fidelity setting, and validation split for the no-spectral and spectral runs. This isolates the contribution of the Fourier magnitude loss. The reported metrics are therefore interpreted as an ablation result, not as a broad claim that the method beats all restoration models. The strongest evidence is the consistent reduction in Freq-L1 paired with improved LPIPS.
