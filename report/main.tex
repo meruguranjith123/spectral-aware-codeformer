@@ -1,0 +1,261 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+\usepackage[margin=0.82in]{geometry}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit}
+\setlength{\columnsep}{0.23in}
+\setlength{\parskip}{0pt}
+\setlength{\parindent}{1em}
+\pagestyle{plain}
+
+\title{\vspace{-0.3in}\bf Spectral-Aware Codebook Learning for High-Fidelity Image Reconstruction}
+\author{Ranjith Merugu\\
+Student ID: 116842918\\
+AMS-563.01\\
+{\tt ranjith.merugu@stonybrook.edu}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Vector-quantized image restoration models replace continuous image features with learned discrete visual codes. This makes restoration tractable and can provide strong perceptual priors, but it also exposes a persistent failure mode: high-frequency details such as hair strands, wrinkles, printed text, and fine boundaries are easily softened by quantization, reconstruction losses, or code prediction uncertainty. This report proposes a spectral-aware extension of the CodeFormer restoration pipeline. The method keeps the CodeFormer design principle of predicting discrete codebook indices from degraded inputs, but augments image-level supervision with a Fourier magnitude loss. The contribution is deliberately scoped: it is not a new foundation model, but a trainable ablation-ready project that tests whether explicit frequency-domain supervision can reduce blur while retaining the robustness of a codebook lookup transformer. Because full training was not completed before this report, numerical conclusions are separated into two categories: published observations from prior work and a realistic experimental protocol for the implemented repository. The report includes a CodeFormer-based codebase, train/evaluation commands, an architecture diagram, a prior-method comparison figure, and future work for completing and publishing the study if the final ablations are strong.
+\end{abstract}
+
+\section{Introduction}
+Image reconstruction from degraded observations is an ill-posed inverse problem. A low-quality image may be produced by blur, sensor noise, compression, downsampling, misalignment, or a mixture of these degradations. Many different high-quality images can be consistent with the same degraded input, which makes direct pixel regression prone to averaging. The visible result is often over-smoothing: the reconstruction has the right large-scale structure, but edges and textures lose their crispness.
+
+Vector-quantized models address part of this ambiguity by learning a discrete vocabulary of visual atoms. VQ-VAE introduced learned discrete latent representations and showed that an encoder can map inputs to codebook entries while a decoder reconstructs images from those entries \cite{oord2017vqvae}. VQGAN later combined a perceptually trained codebook with transformer modeling, showing that compressed visual tokens can support high-resolution synthesis \cite{esser2021taming}. CodeFormer applies this family of ideas to blind face restoration: it learns a high-quality face codebook and trains a transformer to predict code indices from low-quality faces \cite{zhou2022codeformer}. This gives the model a useful prior over plausible restored faces.
+
+The project question is narrower than general blind restoration: can the CodeFormer-style code prediction pipeline be made more frequency aware? Pixel losses encourage average fidelity, perceptual losses encourage feature similarity, and adversarial losses encourage realism. None of them directly asks the reconstruction to match the ground-truth spectrum. This report proposes adding a Fourier-domain loss to the CodeFormer fine-tuning objective:
+\begin{equation}
+L_{\mathrm{freq}} = \left\|\log(1 + |\mathcal{F}(I_{\mathrm{rec}})|) - \log(1 + |\mathcal{F}(I_{\mathrm{gt}})|)\right\|_1,
+\end{equation}
+where $\mathcal{F}$ denotes a two-dimensional FFT applied per channel. The log amplitude form keeps the low-frequency range from dominating the optimization while still penalizing missing high-frequency content. The final objective is
+\begin{equation}
+L = L_{\mathrm{pix}} + L_{\mathrm{perc}} + L_{\mathrm{GAN}} + L_{\mathrm{code}} + \lambda_{\mathrm{freq}} L_{\mathrm{freq}}.
+\end{equation}
+
+\section{Related Work}
+\textbf{Discrete visual representations.} VQ-VAE replaces continuous latents with nearest-neighbor codebook entries and trains with a straight-through estimator \cite{oord2017vqvae}. The main advantage for reconstruction is compression into a finite set of reusable visual primitives. The limitation is also clear: when the codebook or decoder cannot represent a detail exactly, the reconstruction can become softened.
+
+\textbf{Perceptual codebooks and transformers.} VQGAN improves the perceptual quality of codebook reconstructions by using adversarial and perceptual losses, then models the token sequence with transformers \cite{esser2021taming}. This is important for this project because the frequency loss is not proposed as a replacement for VQGAN or transformer context. Instead, it is a complementary supervision signal applied during reconstruction-oriented fine tuning.
+
+\textbf{CodeFormer.} CodeFormer casts blind face restoration as code prediction. Its transformer predicts high-quality codebook entries from degraded inputs, and a fidelity weight controls the trade-off between strict input fidelity and perceptual quality \cite{zhou2022codeformer}. The paper reports strong perceptual restoration behavior on both synthetic and real-world degraded face benchmarks. In the synthetic comparison reported in the NeurIPS paper, CodeFormer improves LPIPS from 0.712 for the degraded input to 0.299 and improves PSNR from 21.53 dB to 22.18 dB. These values are not claimed as this project's results; they are evidence that the chosen base architecture is a reasonable starting point.
+
+\textbf{Perceptual metrics.} LPIPS was proposed after showing that deep network features often correlate with human perceptual judgments better than shallow distortion metrics such as PSNR and SSIM \cite{zhang2018lpips}. This motivates reporting both distortion metrics and perceptual metrics. For this project, Freq-L1 is added as a method-aligned diagnostic rather than a replacement for PSNR, SSIM, or LPIPS.
+
+\section{Method}
+Figure~\ref{fig:architecture} summarizes the proposed pipeline. The model receives a degraded image $I_{\mathrm{LQ}}$, extracts low-quality features, predicts code indices using a transformer, retrieves codebook features, and decodes them into a reconstructed image $I_{\mathrm{rec}}$. The base mechanics follow CodeFormer. The spectral contribution is introduced only at the loss level during fine tuning, which keeps the implementation small and makes ablations clean.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+node distance=0.9cm,
+block/.style={draw, rounded corners=2pt, minimum width=2.2cm, minimum height=0.78cm, align=center, fill=gray!8},
+loss/.style={draw, rounded corners=2pt, minimum width=2.15cm, minimum height=0.72cm, align=center, fill=orange!12},
+arrow/.style={-Latex, thick}
+]
+\node[block] (lq) {LQ input\\degraded image};
+\node[block, right=of lq] (enc) {LQ encoder\\feature extraction};
+\node[block, right=of enc] (tr) {Lookup transformer\\code prediction};
+\node[block, right=of tr] (cb) {VQ codebook\\visual atoms};
+\node[block, right=of cb] (dec) {Decoder\\HQ reconstruction};
+\node[block, right=of dec] (out) {$I_{\mathrm{rec}}$};
+\node[block, below=1.15cm of cb] (gt) {$I_{\mathrm{gt}}$\\HQ target};
+\node[loss, below=1.15cm of dec] (pix) {pixel + LPIPS\\GAN/code losses};
+\node[loss, below=1.15cm of out] (freq) {Fourier magnitude\\$L_{\mathrm{freq}}$};
+\draw[arrow] (lq) -- (enc);
+\draw[arrow] (enc) -- (tr);
+\draw[arrow] (tr) -- (cb);
+\draw[arrow] (cb) -- (dec);
+\draw[arrow] (dec) -- (out);
+\draw[arrow] (gt) -- (pix);
+\draw[arrow] (out) -- (pix);
+\draw[arrow] (gt) -- (freq);
+\draw[arrow] (out) -- (freq);
+\end{tikzpicture}
+\caption{Architecture of the proposed spectral-aware CodeFormer fine-tuning setup. The backbone remains a CodeFormer-style VQ codebook and code lookup transformer. The new supervision branch compares log Fourier magnitudes of the reconstruction and ground truth.}
+\label{fig:architecture}
+\end{figure*}
+
+\subsection{Frequency Loss}
+The implemented loss computes $\mathrm{rfft2}$ over spatial dimensions for each image channel. Magnitudes are compared after $\log(1+x)$ compression. The compression is useful because natural images have large low-frequency energy, so a raw amplitude loss can behave too much like another low-frequency reconstruction term. A small $\lambda_{\mathrm{freq}}$ is recommended at first; the repository default is 0.1. A larger value may improve edge energy but risks ringing artifacts, color noise, or unnatural texture.
+
+\subsection{Why This Is a Unique Contribution}
+The difference from prior VQ reconstruction methods is not the presence of a codebook or transformer. The unique contribution is the explicit frequency-domain supervision added to a codebook lookup restoration model. Figure~\ref{fig:previous} illustrates the conceptual difference. The baseline VQ family learns discrete reconstructions and perceptual realism. CodeFormer adds a strong transformer prior over code composition. The proposed method keeps those strengths but asks the output to match the target spectrum, making the training objective directly aware of detail loss.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/previous_vs_ours.png}
+\caption{Previous methods versus the proposed spectral-aware extension. The figure is conceptual and highlights the unique contribution: Fourier magnitude supervision on top of CodeFormer-style discrete code prediction.}
+\label{fig:previous}
+\end{figure*}
+
+\section{Implementation}
+The submitted codebase starts from the official CodeFormer repository and adds the spectral objective in a minimal way. A new `FrequencyL1Loss` is registered in the BasicSR loss registry. Both `CodeFormerModel` and `CodeFormerJointModel` read an optional `frequency\_opt` block from the YAML training configuration. If the block is absent, upstream behavior is preserved. If it is present, the frequency loss contributes to the generator loss and to the adaptive reconstruction loss used for GAN weighting.
+
+The main training configuration is `options/CodeFormer\_stage3\_spectral.yml`. It is derived from CodeFormer stage-3 training and adds:
+\begin{verbatim}
+frequency_opt:
+  type: FrequencyL1Loss
+  loss_weight: 0.1
+  reduction: mean
+  log_amplitude: true
+\end{verbatim}
+The baseline ablation is obtained by removing this block or setting its weight to zero. This design is important because it keeps all other variables fixed: data, degradation process, codebook, transformer, perceptual loss, and GAN loss. Therefore, any measured improvement in Freq-L1 or visual sharpness can be attributed more cleanly to the spectral term.
+
+\subsection{Reproducibility Commands}
+The repository is intended to be executable without hidden notebook state. After installing the requirements and downloading pretrained weights, the baseline command is:
+\begin{verbatim}
+python basicsr/train.py -opt options/CodeFormer_stage3.yml
+\end{verbatim}
+The spectral-aware training command is:
+\begin{verbatim}
+python basicsr/train.py -opt options/CodeFormer_stage3_spectral.yml
+\end{verbatim}
+For a quick paired-folder check after inference, the repository includes:
+\begin{verbatim}
+python scripts/evaluate_reconstruction.py \
+  --pred_dir results/spectral/restored_faces \
+  --gt_dir datasets/validation/gt
+\end{verbatim}
+This script reports PSNR, a lightweight global SSIM diagnostic, and Freq-L1. The final submission-quality experiment should additionally run a standard LPIPS implementation and should keep the validation split fixed across all rows. The command-level reproducibility is important because the method is not just a paper idea; it has to be directly trainable and inspectable from the GitHub repository.
+
+\subsection{Engineering Choices}
+The implementation keeps the spectral loss as a standard BasicSR loss rather than adding a custom training loop. This choice has three advantages. First, it lets the model use CodeFormer's existing distributed training, checkpointing, logging, and optimizer code. Second, it makes the ablation small: the same YAML file can enable or disable the new loss. Third, it avoids mixing report-only visual tricks into the codebase. The sharpened proxy image in Figure~\ref{fig:visualproxy} is generated only for explanation and is not present as a training or inference path.
+
+Another practical choice is the use of Fourier magnitude rather than complex-valued phase loss. Phase contains spatial alignment information and can be unstable when small misalignments are present. Magnitude comparison is a more conservative first step because it asks whether the reconstruction has similar frequency energy, not whether every frequency component has identical phase. For a face restoration model trained on aligned faces, a future phase-aware or complex loss may be possible, but it is riskier as the first implementation.
+
+\subsection{Expected Failure Cases}
+The most likely failure case is over-sharpening. A spectrum loss can reward high-frequency energy even when that energy corresponds to noise, ringing, or false texture. This is why the default spectral weight is small. Another failure case is metric disagreement: PSNR can penalize sharp details if they are slightly shifted, while LPIPS may reward perceptually plausible texture. A third failure case is identity drift in face restoration. CodeFormer already balances quality and fidelity using a weight parameter; the spectral term may interact with that balance and should be tested at the same fidelity setting for all compared methods.
+
+\section{Experimental Plan}
+\subsection{Datasets}
+The report plan uses CelebA-HQ-style aligned face images for the CodeFormer-consistent experiment and DIV2K as a possible broader reconstruction dataset \cite{karras2018celebahq,agustsson2017div2k}. CelebA-HQ is the more realistic first target because CodeFormer is specifically designed for face restoration. DIV2K is useful later for testing whether the spectral idea transfers beyond faces.
+
+\subsection{Degradation}
+The low-quality image generation follows the CodeFormer training pattern: random blur, downsampling, noise, and JPEG compression. This matters because real restoration systems must handle mixed degradations, not a single bicubic downsampling kernel. The minimum final experiment should use a fixed validation split and identical degradations for every compared method.
+
+\subsection{Metrics}
+The final metric table should contain PSNR, SSIM, LPIPS, and Freq-L1. PSNR and SSIM measure distortion and structure. LPIPS measures deep perceptual similarity \cite{zhang2018lpips}. Freq-L1 measures the property targeted by this project. Since these metrics do not always agree, the report should interpret trade-offs instead of declaring a universal winner from one number.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & Freq-L1$\downarrow$\\
+\midrule
+Degraded input & 21.53 & 0.623 & 0.712 & --\\
+CodeFormer paper & 22.18 & 0.610 & 0.299 & --\\
+Ours, $\lambda=0$ & TBD & TBD & TBD & TBD\\
+Ours, $\lambda=0.1$ & TBD & TBD & TBD & TBD\\
+\bottomrule
+\end{tabular}
+\caption{Report-ready metric table. The first two rows are published synthetic benchmark observations from CodeFormer \cite{zhou2022codeformer}; the last two rows must be filled after running the implemented ablation on the same validation split.}
+\label{tab:metrics}
+\end{table}
+
+\subsection{Ablations}
+The key ablation is $\lambda_{\mathrm{freq}}=0$ versus $\lambda_{\mathrm{freq}}>0$. A small sweep with $\lambda_{\mathrm{freq}}\in\{0.05,0.1,0.2\}$ is recommended if time allows. The expected behavior is that mild spectral loss should reduce Freq-L1 and improve edge visibility, while too much spectral weight may create ringing or amplified noise. This is a hypothesis for evaluation, not a completed result.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{p{0.22\textwidth}p{0.19\textwidth}p{0.22\textwidth}p{0.26\textwidth}}
+\toprule
+Experiment & Controlled variable & What it tests & Interpretation rule\\
+\midrule
+Baseline CodeFormer fine tuning & $\lambda_{\mathrm{freq}}=0$ & Reproduces the same architecture without spectral supervision & Anchor row; all gains must be compared against this row, not against unrelated papers.\\
+Spectral fine tuning & $\lambda_{\mathrm{freq}}=0.1$ & Whether Fourier magnitude supervision reduces spectral mismatch & Strong result requires lower Freq-L1 without severe LPIPS or identity degradation.\\
+Low spectral weight & $\lambda_{\mathrm{freq}}=0.05$ & Whether a very mild term is enough to recover edges & Useful if 0.1 creates artifacts but still improves frequency behavior.\\
+High spectral weight & $\lambda_{\mathrm{freq}}=0.2$ & Sensitivity to over-sharpening & Failure cases should be shown, especially ringing and noise amplification.\\
+Dataset transfer & DIV2K subset & Whether the idea is face-specific or general & Should be reported separately because CodeFormer is face-oriented.\\
+\bottomrule
+\end{tabular}
+\caption{Recommended ablation matrix. Only the first two rows are required for a minimally convincing report; the remaining rows are future extensions if compute allows.}
+\label{tab:ablations}
+\end{table*}
+
+\subsection{Training Schedule}
+A realistic training plan for the remaining work is staged. First, prepare a small aligned training subset and a fixed validation split. Second, run the $\lambda=0$ baseline long enough to confirm that losses decrease and inference outputs are reasonable. Third, initialize the spectral run from the same pretrained checkpoint and keep the random seed, batch size, degradation settings, and validation set fixed. Fourth, export representative success cases and failure cases. The report should not select only the most flattering image; at least one normal case and one failure case should be shown.
+
+\subsection{Data Accounting}
+For the final version, the dataset section should list the exact number of training and validation images, image resolution, degradation ranges, and whether faces are aligned. If CelebA-HQ is used, the experiment should state that the task is aligned face restoration, not arbitrary natural image restoration. If DIV2K is used, the report should state that CodeFormer was not originally designed for generic scenes, so results are exploratory. This distinction prevents over-claiming and makes the contribution more credible.
+
+\section{Visual Results and Observations}
+Figure~\ref{fig:codeformer} uses CodeFormer visual material to show the base method's restoration behavior. CodeFormer is a strong base because it often reconstructs natural-looking faces from substantially degraded inputs. The useful observation for this project is that a perceptually strong reconstruction can still differ from the target in fine spectral details, especially around hair, eyes, skin texture, and compression-sensitive edges.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/codeformer_comparison.png}
+\caption{Representative CodeFormer restoration comparison from the upstream CodeFormer assets. This figure is used as a base-method visual reference, not as a new project result.}
+\label{fig:codeformer}
+\end{figure}
+
+Figure~\ref{fig:visualproxy} includes a placeholder visual panel for the proposed method. The rightmost image is intentionally labeled as a sharpened spectral proxy. It is not produced by the submitted training code and should not be reported as a final experimental result. Its purpose is to communicate the intended qualitative direction: the spectral branch should preserve more edge and texture energy than a purely low-frequency reconstruction.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/visual_results_proxy.png}
+\caption{Visual-result placeholder. The CodeFormer result comes from upstream assets; the proposed-method panel is a simple sharpened proxy for report illustration only. Final claims require trained checkpoints and paired validation metrics.}
+\label{fig:visualproxy}
+\end{figure}
+
+\section{Reasonable Observations}
+The literature supports three conservative observations. First, discrete codebooks are a practical way to compress image structure, but compression can remove details that are rare or not well represented in the codebook \cite{oord2017vqvae}. Second, perceptual and adversarial training can improve realism while not guaranteeing pixel or spectral fidelity \cite{esser2021taming,zhang2018lpips}. Third, CodeFormer demonstrates that code prediction is effective for blind face restoration, with strong LPIPS and MUSIQ behavior in its reported benchmark table \cite{zhou2022codeformer}. These observations justify the project direction without claiming that the spectral extension has already outperformed the base model.
+
+The most reasonable expected metric pattern is not uniform improvement. A spectral loss may improve Freq-L1 and visual sharpness, while PSNR may stay similar or even drop if the model recovers sharper but slightly displaced details. LPIPS may improve if the added details look natural, but it may worsen if the spectrum term amplifies artifacts. Therefore, the correct conclusion after training should be based on a combined reading of metrics and failure cases.
+
+\subsection{Metric Interpretation}
+PSNR is useful because it is simple and reproducible, but it rewards pixel-level closeness more than perceptual realism. SSIM adds a structural comparison, but it is still a hand-designed image similarity measure. LPIPS compares deep features and is better aligned with perceptual judgments in many settings \cite{zhang2018lpips}. Freq-L1 is different: it is not a standard human-perception score, but it is directly tied to the proposed training signal. The best outcome would be a lower Freq-L1 and equal or improved LPIPS, while maintaining PSNR and SSIM within a reasonable range. A lower Freq-L1 alone is not enough if visual artifacts increase.
+
+\subsection{CodeFormer as a Base}
+CodeFormer is especially appropriate as the base because it already separates two ideas: a high-quality codebook and a transformer that predicts code composition. The spectral extension does not disturb this separation. During training, the transformer and restoration modules still learn from degraded inputs, while the new loss checks whether the decoded output preserves the target spectrum. This is cleaner than training an entirely new model because the experiment isolates the research question: does explicit spectral supervision help a strong codebook restoration model?
+
+\subsection{What Would Count as Success}
+A strong final result would satisfy four conditions. First, the spectral model should reduce Freq-L1 on the fixed validation split. Second, LPIPS should improve or remain close to the baseline. Third, visual examples should show sharper edges without obvious ringing. Fourth, failure cases should be understandable and limited. If PSNR drops slightly while LPIPS and Freq-L1 improve, the result may still be acceptable because restoration quality is not purely pixel distortion. If LPIPS worsens or identity visibly changes, the spectral weight should be reduced or redesigned.
+
+\section{Discussion}
+The project sits between two common restoration philosophies. One philosophy prioritizes fidelity to the degraded input and avoids hallucinating detail. Another prioritizes perceptual quality and produces plausible details even when the input is ambiguous. CodeFormer already exposes this tension through its fidelity weight. The spectral loss adds a third pressure: frequency consistency with the ground truth during supervised training. This can be helpful because blur is visible as a loss of high-frequency energy, but it is also dangerous because not all high-frequency energy is meaningful detail.
+
+The report therefore frames the method as a controlled extension rather than a guaranteed improvement. In a strong implementation, the spectral term should act like a gentle regularizer for detail preservation. In a weak implementation, it could become an artifact generator. The ablation matrix in Table~\ref{tab:ablations} is designed to reveal which behavior occurs.
+
+\subsection{Why Not Claim New Results Yet?}
+The proposal and progress deck made clear that implementation and evaluation were still in progress. Adding invented numbers would make the report look complete but would weaken it scientifically. Instead, this report uses published CodeFormer numbers where they exist, labels the project rows as TBD, and provides a runnable codebase to produce the missing rows. This is the most defensible way to satisfy the project-report format while keeping the claims honest.
+
+\subsection{Publication Path}
+If the experiments are strong, the publishable version should include more than a scalar table. It should include radial spectrum plots, crops around fine detail, identity metrics for faces, and a small user study or perceptual preference analysis if possible. It should also compare against a simple post-processing sharpening baseline, because a reviewer will reasonably ask whether the spectral gain is merely sharpening. The current report already includes a sharpened proxy image, so the next version should explicitly beat that kind of simple baseline with trained model outputs.
+
+\section{Limitations}
+This report has three important limitations. First, the full baseline and spectral ablations were not trained before submission. The numeric rows for the new method are therefore intentionally marked TBD. Second, the quick visual proxy is not a trained model output. It is included only to satisfy the visual explanation requirement and is clearly separated from the GitHub implementation. Third, the project is currently face-restoration oriented because CodeFormer itself is face-oriented. A broader claim about general image reconstruction would require additional experiments on DIV2K or another non-face dataset.
+
+There are also implementation limitations. The frequency loss currently compares full-image spectra rather than localized spectra. This means it may miss spatially localized artifacts or reward global energy matching even when details appear in the wrong place. A multi-window or wavelet loss could be more spatially aware. The current evaluator also includes only lightweight PSNR, global SSIM, and Freq-L1; final LPIPS should be computed with a standard library and documented environment.
+
+\section{Ethical and Practical Considerations}
+Face restoration systems can be misused if restored images are treated as factual recovery of identity or detail. Codebook-based methods may synthesize plausible features that were not present in the input. The spectral loss does not remove this concern; it may even make synthesized details sharper. Therefore, restored outputs should be described as reconstructions, not forensic truth. Any public demo should make this limitation visible, especially for old photographs or low-resolution surveillance-like images.
+
+From a practical standpoint, the model should also be evaluated on diverse faces and degradation types. A method that improves average frequency metrics but fails on certain skin tones, lighting conditions, or occlusions would need additional analysis. Since this is a course project, the immediate goal is a clean ablation, but the publication path should include a broader robustness check.
+
+\section{Future Work}
+The next step is to train the baseline and spectral models on the same aligned validation split and fill the metric table with PSNR, SSIM, LPIPS, and Freq-L1. After that, a lambda sweep should test whether spectral weighting has a stable optimum. A stronger version of the method could use multi-scale FFT losses, band-limited high-frequency losses, or wavelet-domain losses to separate useful edge recovery from noise amplification. Another direction is to add spectrum-aware validation plots, such as radial power spectrum error curves, which would make the analysis more specific than a single scalar Freq-L1.
+
+I will continue working on this project after the report deadline and plan to publish it if the trained ablations show strong and reproducible results.
+
+\section{Conclusion}
+This project proposes a scoped spectral-aware extension to CodeFormer. The core idea is simple: keep the robust VQ codebook and transformer code prediction pipeline, but add Fourier-domain supervision so the training objective directly measures missing spectral detail. The codebase is trainable and ablation-ready, and the report separates prior-work observations from future experimental claims. If the completed runs show lower Freq-L1 without unacceptable artifacts or identity drift, the method would provide a useful and lightweight contribution to codebook-based image reconstruction.
+
+\clearpage
+{\small
+\bibliographystyle{ieeetr}
+\bibliography{references}
+}
+\end{document}
