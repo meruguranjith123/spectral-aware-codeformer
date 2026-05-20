@@ -59,48 +59,7 @@ Figure~\ref{fig:architecture} summarizes the implemented pipeline. The model rec
 
 \begin{figure*}[t]
 \centering
-\begin{tikzpicture}[
-node distance=0.58cm,
-block/.style={draw, rounded corners=2pt, minimum width=1.9cm, minimum height=0.66cm, align=center, fill=gray!8, font=\scriptsize},
-loss/.style={draw, rounded corners=2pt, minimum width=1.85cm, minimum height=0.62cm, align=center, fill=orange!12, font=\scriptsize},
-prior/.style={draw, rounded corners=2pt, minimum width=1.8cm, minimum height=0.62cm, align=center, fill=blue!8, font=\scriptsize},
-data/.style={draw, rounded corners=2pt, minimum width=1.85cm, minimum height=0.62cm, align=center, fill=green!8, font=\scriptsize},
-arrow/.style={-Latex, thick}
-]
-\node[data] (hq) {HQ image\\$I_{\mathrm{gt}}$};
-\node[data, below=0.62cm of hq] (deg) {degradation\\blur/noise/JPEG};
-\node[data, below=0.62cm of deg] (lq) {LQ input\\$I_{\mathrm{LQ}}$};
-\node[block, right=0.75cm of lq] (enc) {LQ encoder\\multi-scale feats};
-\node[block, right=of enc] (tr) {lookup transformer\\code logits};
-\node[prior, above=0.72cm of tr] (idx) {latent target\\code indices};
-\node[prior, right=of tr] (cb) {VQ codebook\\1024 atoms};
-\node[block, right=of cb] (dec) {decoder\\HQ image};
-\node[data, right=of dec] (out) {$I_{\mathrm{rec}}$};
-\node[loss, below=0.72cm of cb] (code) {CE + feature\\code losses};
-\node[loss, below=0.72cm of dec] (pix) {pixel + LPIPS\\GAN loss};
-\node[loss, below=0.72cm of out] (freq) {log FFT magnitude\\$L_{\mathrm{freq}}$};
-\node[loss, right=0.55cm of freq] (total) {total loss\\weighted sum};
-\node[prior, above=0.72cm of cb] (vq) {fixed HQ VQGAN\\codebook prior};
-\draw[arrow] (hq) -- (deg);
-\draw[arrow] (deg) -- (lq);
-\draw[arrow] (lq) -- (enc);
-\draw[arrow] (enc) -- (tr);
-\draw[arrow] (tr) -- (cb);
-\draw[arrow] (cb) -- (dec);
-\draw[arrow] (dec) -- (out);
-\draw[arrow] (hq) -| (idx);
-\draw[arrow] (idx) -- (tr);
-\draw[arrow] (vq) -- (cb);
-\draw[arrow] (tr) -- (code);
-\draw[arrow] (idx) -- (code);
-\draw[arrow] (out) -- (pix);
-\draw[arrow] (hq) -| (pix);
-\draw[arrow] (hq) -| (freq);
-\draw[arrow] (out) -- (freq);
-\draw[arrow] (code) -- (total);
-\draw[arrow] (pix) -- (total);
-\draw[arrow] (freq) -- (total);
-\end{tikzpicture}
+\includegraphics[width=\textwidth]{figures/architecture_diagram.png}
 \caption{Detailed spectral-aware CodeFormer training pipeline. Degraded inputs are encoded and mapped to high-quality code indices by the lookup transformer. The VQ codebook and decoder reconstruct the image, while pixel, perceptual, adversarial, code prediction, and log-Fourier losses supervise complementary properties.}
 \label{fig:architecture}
 \end{figure*}
@@ -266,7 +225,6 @@ Face restoration systems can be misused if restored images are treated as factua
 
 From a practical standpoint, the model is evaluated across diverse faces and degradation types. Average frequency improvements are interpreted together with visual inspection because a method that improves Freq-L1 but fails on skin tone, lighting, or occlusion cases is not robust. The current project establishes the clean ablation, and the continued publication path expands the robustness check.
 
-\clearpage
 \section{Continued Work}
 The completed baseline and spectral runs establish the main trend, and continued work expands the analysis. Multi-scale FFT losses, band-limited high-frequency losses, and wavelet-domain losses separate useful edge recovery from noise amplification more precisely than the current full-spectrum objective. Spectrum-aware validation plots, such as radial power spectrum error curves, make the analysis more specific than a single scalar Freq-L1.
 
@@ -275,7 +233,6 @@ I am continuing this project after the report deadline and preparing it for publ
 \section{Conclusion}
 This project presents a scoped spectral-aware extension to CodeFormer. The core idea is simple: keep the robust VQ codebook and transformer code prediction pipeline, but add Fourier-domain supervision so the training objective directly measures missing spectral detail. The codebase is trainable, the ablation is controlled, and the results show lower Freq-L1 with improved LPIPS at a moderate spectral weight. The method provides a lightweight contribution to codebook-based image reconstruction by improving fine-detail consistency without changing the inference architecture.
 
-\clearpage
 {\small
 \bibliographystyle{ieeetr}
 \bibliography{references}
