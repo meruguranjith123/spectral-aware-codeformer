@@ -63,45 +63,6 @@ frequency_opt:
   log_amplitude: true
 ```
 
-## Generate Outputs For Comparison
-
-Run inference with the no-FFT checkpoint and save outputs to a folder such as:
-
-```text
-results/nofft/restored_faces
-```
-
-Run inference with the FFT-loss checkpoint and save outputs to:
-
-```text
-results/fft/restored_faces
-```
-
-Keep the same validation images and filenames for both runs.
-
-## Evaluate No-FFT vs FFT
-
-```bash
-python scripts/compare_fft_ablation.py \
-  --nofft_dir results/nofft/restored_faces \
-  --fft_dir results/fft/restored_faces \
-  --gt_dir datasets/validation/gt
-```
-
-Expected output format:
-
-```text
-| model | images | PSNR up | SSIM up | Freq-L1 down |
-|---|---:|---:|---:|---:|
-| nofft | ... | ... | ... | ... |
-| fft | ... | ... | ... | ... |
-
-Delta fft - nofft:
-PSNR:    ...
-SSIM:    ...
-Freq-L1: ...
-```
-
 ## Notes
 
 The repository is based on CodeFormer and keeps its license terms. The project-specific contribution is the FFT/Fourier loss integration and the ablation workflow for comparing restoration with and without spectral supervision.
